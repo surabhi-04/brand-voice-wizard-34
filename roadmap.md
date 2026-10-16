@@ -1,1 +1,4 @@
-- [ ] Inspect existing project and prepare a Vite/Vercel migration plan for review; do not implement until approved.
+- [ ] Replace the TanStack Start app bootstrap with a conventional React + Vite single-page frontend and Vercel static deployment configuration.
+- [ ] Build the Brand Voice AI editorial studio with validated campaign form, truthful integration-pending behavior, and campaign library.
+- [ ] Document separate Node/Express backend API contracts and keep secrets out of the frontend.
+- [ ] Run tests, lint, production build, and desktop/mobile interaction checks; resolve any failures.
