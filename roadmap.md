@@ -1,0 +1,1 @@
+- [ ] Inspect existing project and prepare a Vite/Vercel migration plan for review; do not implement until approved.
