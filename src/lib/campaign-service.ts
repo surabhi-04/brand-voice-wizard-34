@@ -41,6 +41,20 @@ export const campaignResultSchema = z.object({
 
 export type CampaignResult = z.infer<typeof campaignResultSchema>;
 export type Tweet = CampaignResult["tweets"][number];
+export const campaignHistorySchema = z.array(
+  z.object({
+    id: z.string().min(1),
+    brandName: z.string().min(1),
+    objective: z.string().min(1),
+    createdAt: z.string().optional(),
+    url: z.string().url().optional(),
+  }),
+);
+export type CampaignHistoryItem = z.infer<typeof campaignHistorySchema>[number];
+
+export function hasCampaignApi() {
+  return Boolean(import.meta.env.VITE_API_BASE_URL?.trim());
+}
 
 export class IntegrationPendingError extends Error {
   constructor(message = "Campaign generation is not connected yet. Add the deployed Express API address to VITE_API_BASE_URL to enable it.") {
@@ -94,4 +108,16 @@ export async function regenerateCampaign(campaignId: string, input: CampaignInpu
 export async function saveCampaignToNotion(campaignId: string, result: CampaignResult) {
   const schema = z.object({ saved: z.literal(true), url: z.string().url().optional() });
   return request(`/api/campaigns/${encodeURIComponent(campaignId)}/notion-save`, result, schema);
+}
+
+export async function getCampaignHistory(): Promise<CampaignHistoryItem[]> {
+  const response = await fetch(apiUrl("/api/campaigns/history"), {
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || `Campaign history could not be loaded (${response.status}).`);
+  }
+  const payload: unknown = await response.json();
+  return campaignHistorySchema.parse(payload);
 }
