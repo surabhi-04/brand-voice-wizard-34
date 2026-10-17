@@ -53,7 +53,7 @@ export const campaignHistorySchema = z.array(
 export type CampaignHistoryItem = z.infer<typeof campaignHistorySchema>[number];
 
 export function hasCampaignApi() {
-  return Boolean(import.meta.env.VITE_API_BASE_URL?.trim());
+  return Boolean(import.meta.env["VITE_API_BASE_URL"]?.trim());
 }
 
 export class IntegrationPendingError extends Error {
@@ -64,7 +64,7 @@ export class IntegrationPendingError extends Error {
 }
 
 function apiUrl(path: string) {
-  const base = import.meta.env.VITE_API_BASE_URL?.trim();
+  const base = import.meta.env["VITE_API_BASE_URL"]?.trim();
   if (!base) throw new IntegrationPendingError();
   return `${base.replace(/\/$/, "")}${path}`;
 }
