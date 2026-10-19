@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { config } from "../src/config.js";
 import {
   createDatabasePool,
+  buildSslOptions,
+  buildPoolOptions,
   ensureDatabaseExists,
   runDatabaseMigrations,
   initializeDatabase,
@@ -260,5 +262,67 @@ describe("MySQL Database & Repository Integration Suite", () => {
     const dataString = JSON.stringify(data);
     assert.equal(dataString.includes("root"), false, "Password must not be exposed in health check");
     assert.equal(dataString.includes("password"), false, "Password field must not be exposed");
+  });
+
+  describe("Aiven MySQL SSL & Certificate Configuration", () => {
+    it("preserves local behavior when SSL is disabled", () => {
+      const configNoSsl = { host: "localhost", ssl: false };
+      assert.equal(buildSslOptions(configNoSsl), undefined);
+
+      const poolOpts = buildPoolOptions(configNoSsl);
+      assert.equal(poolOpts.ssl, undefined);
+      assert.equal(poolOpts.host, "localhost");
+    });
+
+    it("enforces strict TLS verification (rejectUnauthorized: true) when SSL is enabled without CA", () => {
+      const configSslNoCa = { host: "aiven-mysql.example.com", ssl: true };
+      const ssl = buildSslOptions(configSslNoCa);
+      assert.deepEqual(ssl, { rejectUnauthorized: true });
+
+      const poolOpts = buildPoolOptions(configSslNoCa);
+      assert.deepEqual(poolOpts.ssl, { rejectUnauthorized: true });
+    });
+
+    it("configures strict TLS verification and injects trusted Aiven CA certificate when provided", () => {
+      const mockAivenCa = "-----BEGIN CERTIFICATE-----\nMOCKAIVENCA1234567890\n-----END CERTIFICATE-----";
+      const configSslWithCa = {
+        host: "aiven-mysql.example.com",
+        ssl: true,
+        caCert: mockAivenCa,
+      };
+      const ssl = buildSslOptions(configSslWithCa);
+      assert.deepEqual(ssl, {
+        rejectUnauthorized: true,
+        ca: mockAivenCa,
+      });
+
+      const poolOpts = buildPoolOptions(configSslWithCa);
+      assert.deepEqual(poolOpts.ssl, {
+        rejectUnauthorized: true,
+        ca: mockAivenCa,
+      });
+    });
+
+    it("reads MYSQL_CA_CERT and MYSQL_SSL from environment variables in config", () => {
+      const prevCa = process.env.MYSQL_CA_CERT;
+      const prevSsl = process.env.MYSQL_SSL;
+      try {
+        process.env.MYSQL_SSL = "true";
+        process.env.MYSQL_CA_CERT = "-----BEGIN CERTIFICATE-----\nENVTESTCA\n-----END CERTIFICATE-----";
+        assert.equal(config.mysql.ssl, true);
+        assert.equal(config.mysql.caCert, "-----BEGIN CERTIFICATE-----\nENVTESTCA\n-----END CERTIFICATE-----");
+      } finally {
+        if (prevCa !== undefined) {
+          process.env.MYSQL_CA_CERT = prevCa;
+        } else {
+          delete process.env.MYSQL_CA_CERT;
+        }
+        if (prevSsl !== undefined) {
+          process.env.MYSQL_SSL = prevSsl;
+        } else {
+          delete process.env.MYSQL_SSL;
+        }
+      }
+    });
   });
 });

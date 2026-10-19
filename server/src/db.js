@@ -560,9 +560,18 @@ export class MySQLRepository {
 
 let globalPool = null;
 
-export function createDatabasePool(dbConfig) {
-  if (globalPool) return globalPool;
+export function buildSslOptions(dbConfig) {
+  if (!dbConfig?.ssl) {
+    return undefined;
+  }
+  const sslOptions = { rejectUnauthorized: true };
+  if (dbConfig.caCert) {
+    sslOptions.ca = dbConfig.caCert;
+  }
+  return sslOptions;
+}
 
+export function buildPoolOptions(dbConfig) {
   const connectionLimit = process.env.VERCEL ? 3 : 10;
   const poolOptions = {
     host: dbConfig.host || "localhost",
@@ -576,10 +585,17 @@ export function createDatabasePool(dbConfig) {
     timezone: "Z",
   };
 
-  if (dbConfig.ssl) {
-    poolOptions.ssl = { rejectUnauthorized: true };
+  const ssl = buildSslOptions(dbConfig);
+  if (ssl) {
+    poolOptions.ssl = ssl;
   }
 
+  return poolOptions;
+}
+
+export function createDatabasePool(dbConfig) {
+  if (globalPool) return globalPool;
+  const poolOptions = buildPoolOptions(dbConfig);
   globalPool = mysql.createPool(poolOptions);
   return globalPool;
 }
@@ -604,8 +620,9 @@ export async function ensureDatabaseExists(dbConfig) {
     password: dbConfig.password,
   };
 
-  if (dbConfig.ssl) {
-    connOptions.ssl = { rejectUnauthorized: true };
+  const ssl = buildSslOptions(dbConfig);
+  if (ssl) {
+    connOptions.ssl = ssl;
   }
 
   try {

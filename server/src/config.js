@@ -84,6 +84,7 @@ export function validateEnvironment() {
     process.env.MYSQL_SSL === "true" ||
     process.env.MYSQL_SSL === "1" ||
     Boolean(dbUrlConfig?.ssl);
+  const mysqlCaCert = process.env.MYSQL_CA_CERT?.trim() || "";
   const mysqlSkipCreateDb =
     process.env.MYSQL_SKIP_CREATE_DB === "true" ||
     process.env.MYSQL_SKIP_CREATE_DB === "1";
@@ -148,7 +149,9 @@ export function validateEnvironment() {
   console.log(
     `MySQL Database: ${
       isDbConfigured
-        ? `Configured (${mysqlUser}@${mysqlHost}:${mysqlPort}/${mysqlDatabase}${mysqlSsl ? " [SSL]" : ""})`
+        ? `Configured (${mysqlUser}@${mysqlHost}:${mysqlPort}/${mysqlDatabase}${
+            mysqlSsl ? ` [SSL${mysqlCaCert ? " + CA]" : "]"}` : ""
+          })`
         : "NOT CONFIGURED (Using in-memory repository)"
     }`,
   );
@@ -183,6 +186,7 @@ export function validateEnvironment() {
       user: mysqlUser,
       password: mysqlPassword,
       ssl: mysqlSsl,
+      caCert: mysqlCaCert,
       skipCreateDb: mysqlSkipCreateDb,
     },
     isDbConfigured,
@@ -265,6 +269,7 @@ export const config = {
         process.env.MYSQL_SSL === "true" ||
         process.env.MYSQL_SSL === "1" ||
         Boolean(dbUrlConfig?.ssl),
+      caCert: process.env.MYSQL_CA_CERT?.trim() || "",
       skipCreateDb:
         process.env.MYSQL_SKIP_CREATE_DB === "true" ||
         process.env.MYSQL_SKIP_CREATE_DB === "1",
