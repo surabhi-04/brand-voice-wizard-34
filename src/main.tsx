@@ -1,6 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { Toaster } from "sonner";
+import { Toaster } from "./components/ui/sonner";
 import App from "./App";
 import "./styles.css";
 

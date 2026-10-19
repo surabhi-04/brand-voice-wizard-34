@@ -9,5 +9,15 @@ const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { "@": path.resolve(projectRoot, "src") } },
-  server: { host: "0.0.0.0", port: 8080, strictPort: true },
+  server: {
+    host: "0.0.0.0",
+    port: 8080,
+    strictPort: true,
+    proxy: {
+      "/api": {
+        target: "http://localhost:3001",
+        changeOrigin: true,
+      },
+    },
+  },
 });

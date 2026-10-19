@@ -15,6 +15,21 @@ dist-ssr
 .tanstack/**
 .nitro
 *.local
+.env
+.env.*
+!.env.example
+server/.env
+server/.env.*
+!server/.env.example
+server/data/
+
+# Private keys and SSL certificates
+*.pem
+*.key
+*.cert
+*.crt
+*.pfx
+*.p12
 
 # Wrangler / Cloudflare
 .wrangler/

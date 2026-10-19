@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import {
   ArrowDown,
   ArrowRight,
@@ -9,28 +9,46 @@ import {
   Feather,
   Menu,
   MessageCircle,
+  Moon,
   RefreshCw,
   Sparkles,
+  Sun,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { useTheme } from "@/hooks/use-theme";
+import { cn } from "@/lib/utils";
 import {
   campaignInputSchema,
+  emojiCountOptions,
+  emojiUsageOptions,
   generateCampaign,
   getCampaignHistory,
+  getTweetCharacterCount,
   hasCampaignApi,
   IntegrationPendingError,
+  AuthRequiredError,
   regenerateCampaign,
   regenerateTweet,
   saveCampaignToNotion,
+  transferGuestCampaign,
+  NotionNotConnectedError,
   type CampaignHistoryItem,
   type CampaignInput,
   type CampaignResult,
   type Tweet,
 } from "@/lib/campaign-service";
+import { useAuth } from "@/lib/auth-context";
+import { GoogleSignInButton } from "@/components/auth/GoogleSignInButton";
+import { UserMenu } from "@/components/auth/UserMenu";
+import { getNotionStatus, type NotionStatus } from "@/lib/notion-service";
+import { NotionConnectModal } from "./NotionConnectModal";
+import { NotionDestinationModal } from "./NotionDestinationModal";
+import { NotionWorkspaceStatus } from "./NotionWorkspaceStatus";
+import { SignInRequiredModal } from "../auth/SignInRequiredModal";
 
 const objectives = [
   "Brand awareness",
@@ -41,7 +59,15 @@ const objectives = [
   "Traffic",
 ] as const;
 
-const tones = ["Witty", "Friendly", "Bold", "Professional", "Playful", "Informative", "Empathetic"] as const;
+const tones = [
+  "Witty",
+  "Friendly",
+  "Bold",
+  "Professional",
+  "Playful",
+  "Informative",
+  "Empathetic",
+] as const;
 
 const initialForm: CampaignInput = {
   brandName: "",
@@ -51,13 +77,17 @@ const initialForm: CampaignInput = {
   audience: "",
   tones: [],
   instructions: "",
+  emojiUsage: "No",
+  emojiCount: "4 out of 10",
 };
 
+export const DRAFT_STORAGE_KEY = "brand_voice_active_campaign";
+
 const statusMessages = [
-  "Listening for the details you shared…",
-  "Shaping a voice profile…",
-  "Finding ten distinct ways in…",
-  "Giving every line a final read…",
+  "Creating your brand voice profile and 10 campaign tweets…",
+  "Analyzing brand brief and voice traits…",
+  "Drafting 10 high-impact campaign tweets…",
+  "Refining tone, angles, and character counts…",
 ];
 
 function formatDate(value?: string) {
@@ -65,7 +95,11 @@ function formatDate(value?: string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime())
     ? "Date unavailable"
-    : new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(date);
+    : new Intl.DateTimeFormat(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      }).format(date);
 }
 
 function SectionLabel({ children }: { children: ReactNode }) {
@@ -74,11 +108,18 @@ function SectionLabel({ children }: { children: ReactNode }) {
 
 function Wordmark({ compact = false }: { compact?: boolean }) {
   return (
-    <a href="#top" aria-label="Brand Voice AI home" className="inline-flex items-center gap-2.5 text-foreground no-underline">
-      <span className="grid size-9 place-items-center rounded-full bg-primary text-primary-foreground" aria-hidden="true">
+    <a
+      href="#top"
+      aria-label="Brand Voice AI home"
+      className="inline-flex items-center gap-2.5 text-foreground no-underline min-w-0 shrink"
+    >
+      <span
+        className="grid size-9 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground"
+        aria-hidden="true"
+      >
         <Feather size={17} strokeWidth={1.8} />
       </span>
-      <span className="text-[0.91rem] font-semibold tracking-normal">
+      <span className="text-[0.91rem] font-semibold tracking-normal truncate">
         Brand Voice <span className="font-normal text-muted-foreground">AI</span>
       </span>
       {!compact && <span className="sr-only">— Find the voice. Make it matter.</span>}
@@ -86,44 +127,128 @@ function Wordmark({ compact = false }: { compact?: boolean }) {
   );
 }
 
+export function ThemeToggle({ className }: { className?: string }) {
+  const { toggleTheme, isDark } = useTheme();
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      onClick={toggleTheme}
+      className={cn(
+        "size-9 rounded-sm border border-border text-foreground hover:bg-secondary transition-colors",
+        className,
+      )}
+      aria-label={isDark ? "Switch to light theme" : "Switch to dark theme"}
+      title={isDark ? "Switch to light theme" : "Switch to dark theme"}
+      aria-pressed={isDark}
+      data-testid="theme-toggle"
+    >
+      {isDark ? (
+        <Sun className="size-4 text-primary" aria-hidden="true" />
+      ) : (
+        <Moon className="size-4 text-foreground" aria-hidden="true" />
+      )}
+    </Button>
+  );
+}
+
 function Navigation() {
   const [menuOpen, setMenuOpen] = useState(false);
+  const { user } = useAuth();
   const closeMenu = () => setMenuOpen(false);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [menuOpen]);
+
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur-sm">
-      <div className="section-wrap flex h-[72px] items-center justify-between">
+      <div className="section-wrap flex h-[72px] items-center justify-between gap-3">
         <Wordmark />
         <nav aria-label="Main navigation" className="hidden items-center gap-8 md:flex">
-          <a className="text-sm text-muted-foreground transition-colors hover:text-foreground" href="#studio">Studio</a>
-          <a className="text-sm text-muted-foreground transition-colors hover:text-foreground" href="#how-it-works">How it works</a>
-          <a className="text-sm text-muted-foreground transition-colors hover:text-foreground" href="#library">Campaign library</a>
+          <a
+            className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+            href="#studio"
+          >
+            Studio
+          </a>
+          <a
+            className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+            href="#how-it-works"
+          >
+            How it works
+          </a>
+          <a
+            className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+            href="#library"
+          >
+            Campaign library
+          </a>
         </nav>
-        <div className="hidden md:block">
+        <div className="hidden items-center gap-3 md:flex">
+          {user ? <UserMenu /> : <GoogleSignInButton variant="compact" text="Sign in" />}
+          <ThemeToggle />
           <Button asChild size="sm" className="h-10 rounded-sm px-4">
-            <a href="#studio">Create campaign <ArrowRight aria-hidden="true" /></a>
+            <a href="#studio" data-testid="nav-cta-button">
+              {user ? "Create campaign" : "Try Demo"} <ArrowRight aria-hidden="true" />
+            </a>
           </Button>
         </div>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          aria-label={menuOpen ? "Close navigation menu" : "Open navigation menu"}
-          aria-expanded={menuOpen}
-          className="md:hidden"
-          onClick={() => setMenuOpen((open) => !open)}
-        >
-          {menuOpen ? <X /> : <Menu />}
-        </Button>
+        <div className="flex items-center gap-2 md:hidden shrink-0">
+          {user ? <UserMenu compact /> : <GoogleSignInButton variant="compact" text="Sign in" />}
+          <ThemeToggle />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label={menuOpen ? "Close navigation menu" : "Open navigation menu"}
+            aria-expanded={menuOpen}
+            className="size-9 rounded-sm border border-border hover:bg-secondary"
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            {menuOpen ? <X size={18} /> : <Menu size={18} />}
+          </Button>
+        </div>
       </div>
       {menuOpen && (
-        <nav aria-label="Mobile navigation" className="section-wrap grid gap-1 border-t border-border py-3 md:hidden">
-          {[["Studio", "#studio"], ["How it works", "#how-it-works"], ["Campaign library", "#library"]].map(([label, href]) => (
-            <a key={href} href={href} onClick={closeMenu} className="rounded-sm px-2 py-3 text-sm text-foreground hover:bg-secondary">
+        <nav
+          aria-label="Mobile navigation"
+          className="section-wrap grid gap-1 border-t border-border py-4 animate-in fade-in-50 duration-150 md:hidden"
+        >
+          {[
+            ["Studio", "#studio"],
+            ["How it works", "#how-it-works"],
+            ["Campaign library", "#library"],
+          ].map(([label, href]) => (
+            <a
+              key={href}
+              href={href}
+              onClick={closeMenu}
+              className="rounded-sm px-3 py-3 text-sm font-medium text-foreground hover:bg-secondary transition-colors"
+            >
               {label}
             </a>
           ))}
-          <Button asChild className="mt-2 rounded-sm" onClick={closeMenu}>
-            <a href="#studio">Create campaign <ArrowRight aria-hidden="true" /></a>
+          {!user && (
+            <div className="py-2">
+              <GoogleSignInButton
+                size="default"
+                className="w-full justify-center"
+                onSuccess={closeMenu}
+              />
+            </div>
+          )}
+          <Button asChild className="mt-2 h-11 w-full rounded-sm" onClick={closeMenu}>
+            <a href="#studio">
+              {user ? "Create campaign" : "Try Demo"} <ArrowRight aria-hidden="true" />
+            </a>
           </Button>
         </nav>
       )}
@@ -132,6 +257,7 @@ function Navigation() {
 }
 
 function Hero() {
+  const { user } = useAuth();
   return (
     <section id="top" className="hero-grid border-b border-border">
       <div className="section-wrap grid items-center gap-8 py-14 md:min-h-[600px] md:grid-cols-[1.02fr_0.98fr] md:gap-12 md:py-20">
@@ -140,54 +266,165 @@ function Hero() {
             <span className="h-px w-8 bg-accent" aria-hidden="true" />
             <SectionLabel>AI brand content studio</SectionLabel>
           </div>
-          <h1 className="font-display text-[clamp(4rem,7vw,6.7rem)] leading-[0.87] text-foreground">
-            Find the voice.<br /><span className="italic text-primary">Make it matter.</span>
+          <h1 className="font-display text-[clamp(2.75rem,7vw,6.5rem)] leading-[0.9] sm:leading-[0.87] text-foreground break-words">
+            Find the voice.
+            <br />
+            <span className="italic text-primary">Make it matter.</span>
           </h1>
-          <p className="mt-7 max-w-[430px] text-[1.08rem] leading-8 text-muted-foreground">
+          <p className="mt-6 sm:mt-7 max-w-[430px] text-[1rem] sm:text-[1.08rem] leading-7 sm:leading-8 text-muted-foreground">
             Turn what makes a brand distinctive into 10 ideas worth posting.
           </p>
-          <div className="mt-9 flex flex-wrap items-center gap-x-7 gap-y-4">
-            <Button asChild size="lg" className="h-12 rounded-sm px-6">
-              <a href="#studio">Create your campaign <ArrowRight aria-hidden="true" /></a>
-            </Button>
-            <a className="inline-flex items-center gap-2 text-sm font-medium text-foreground underline decoration-border underline-offset-4 hover:decoration-foreground" href="#how-it-works">
+          <div className="mt-8 sm:mt-9 flex flex-wrap items-center gap-4">
+            {!user ? (
+              <>
+                <Button
+                  asChild
+                  size="lg"
+                  className="h-12 w-full xs:w-auto rounded-sm px-6 justify-center gap-2"
+                  data-testid="hero-try-demo-button"
+                >
+                  <a href="#studio">
+                    <Sparkles className="size-4" aria-hidden="true" />
+                    Try Demo <ArrowRight aria-hidden="true" />
+                  </a>
+                </Button>
+                <div data-testid="hero-google-signin">
+                  <GoogleSignInButton
+                    variant="editorial"
+                    text="Sign in with Google"
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <Button
+                  asChild
+                  size="lg"
+                  className="h-12 w-full xs:w-auto rounded-sm px-6 justify-center"
+                >
+                  <a href="#studio">
+                    Create campaign <ArrowRight aria-hidden="true" />
+                  </a>
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  Signed in as <strong className="text-foreground">{user.name}</strong>
+                </span>
+              </>
+            )}
+            <a
+              className="inline-flex items-center gap-2 text-sm font-medium text-foreground underline decoration-border underline-offset-4 hover:decoration-foreground ml-1"
+              href="#how-it-works"
+            >
               See how it works <ArrowDown size={15} aria-hidden="true" />
             </a>
           </div>
-          <p className="mt-7 text-xs text-muted-foreground">A considered starting point—not a scan of live social profiles.</p>
+          <p className="mt-6 sm:mt-7 text-xs text-muted-foreground">
+            A considered starting point—not a scan of live social profiles.
+          </p>
         </div>
         <div className="hero-art animate-in" aria-label="Illustrative campaign preview" role="img">
           <div className="hero-sheet hero-sheet-back" aria-hidden="true" />
           <div className="hero-sheet hero-sheet-front" aria-hidden="true">
             <div className="flex items-center justify-between border-b border-border pb-4">
               <span className="eyebrow">A voice, in brief</span>
-              <span className="grid size-8 place-items-center rounded-full bg-secondary text-primary"><MessageCircle size={15} /></span>
+              <span className="grid size-8 place-items-center rounded-full bg-secondary text-primary">
+                <MessageCircle size={15} />
+              </span>
             </div>
-            <div className="hero-quote" aria-hidden="true">“</div>
-            <p className="mt-8 max-w-[250px] font-display text-[2rem] leading-[1.05]">Warm enough to invite.<br /><i>Clear enough to stay.</i></p>
+            <div className="hero-quote" aria-hidden="true">
+              “
+            </div>
+            <p className="mt-6 sm:mt-8 max-w-[250px] font-display text-[1.65rem] sm:text-[2rem] leading-[1.05]">
+              Warm enough to invite.
+              <br />
+              <i>Clear enough to stay.</i>
+            </p>
             <div className="mt-7 flex flex-wrap gap-2">
-              {["Conversational", "Thoughtful", "Bright"].map((tag) => <span key={tag} className="rounded-full border border-border px-2.5 py-1 text-[0.66rem] text-muted-foreground">{tag}</span>)}
+              {["Conversational", "Thoughtful", "Bright"].map((tag) => (
+                <span
+                  key={tag}
+                  className="rounded-full border border-border px-2.5 py-1 text-[0.66rem] text-muted-foreground"
+                >
+                  {tag}
+                </span>
+              ))}
             </div>
             <div className="mt-5 flex items-center justify-between border-t border-border pt-3 text-[0.65rem] text-muted-foreground">
-              <span>Illustrative preview</span><span>01 / 10</span>
+              <span>Illustrative preview</span>
+              <span>01 / 10</span>
             </div>
           </div>
-          <span className="hero-ten" aria-hidden="true">10</span>
-          <span className="note-mark text-center font-display text-[1.02rem] leading-tight" aria-hidden="true">ideas<br />with intent</span>
-          <span className="absolute right-[6%] top-2 text-[0.64rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground">A campaign, considered</span>
+          <div className="hero-editorial-stamp" aria-hidden="true">
+            <svg
+              viewBox="0 0 36 36"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="size-7 text-primary"
+            >
+              <path d="M18 33C18 23 17 13 18 3" />
+              <path
+                d="M18 26C13 24 10.5 21 11.5 17C15.5 18 17 21 18 26Z"
+                fill="currentColor"
+                fillOpacity="0.12"
+              />
+              <path
+                d="M18 22C23 20 25.5 17 24.5 13C20.5 14 19 17 18 22Z"
+                fill="currentColor"
+                fillOpacity="0.12"
+              />
+              <path
+                d="M18 15C13 13 11 9.5 12 6C16 7 17 10 18 15Z"
+                fill="currentColor"
+                fillOpacity="0.12"
+              />
+              <path
+                d="M18 11C23 9 25 5.5 24 2C20 3 19 6 18 11Z"
+                fill="currentColor"
+                fillOpacity="0.12"
+              />
+              <circle cx="18" cy="3" r="1" fill="currentColor" />
+            </svg>
+            <span className="hero-stamp-text">
+              Ideas with
+              <br />
+              intent
+            </span>
+          </div>
+          <span
+            className="note-mark text-center font-display text-[0.98rem] leading-tight"
+            aria-hidden="true"
+          >
+            distinct
+            <br />
+            &amp; clear
+          </span>
+          <span className="absolute right-[6%] top-2 text-[0.64rem] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+            A campaign, considered
+          </span>
         </div>
       </div>
     </section>
   );
 }
 
-function ToneSelector({ value, onChange }: { value: CampaignInput["tones"]; onChange: (tones: CampaignInput["tones"]) => void }) {
+function ToneSelector({
+  value,
+  onChange,
+}: {
+  value: CampaignInput["tones"];
+  onChange: (tones: CampaignInput["tones"]) => void;
+}) {
   function toggle(tone: (typeof tones)[number]) {
     onChange(value.includes(tone) ? value.filter((item) => item !== tone) : [...value, tone]);
   }
   return (
     <fieldset>
-      <legend className="field-label">Preferred tone <span className="font-normal text-muted-foreground">· choose any</span></legend>
+      <legend className="field-label">
+        Preferred tone <span className="font-normal text-muted-foreground">· choose any</span>
+      </legend>
       <div className="flex flex-wrap gap-2">
         {tones.map((tone) => {
           const selected = value.includes(tone);
@@ -200,12 +437,98 @@ function ToneSelector({ value, onChange }: { value: CampaignInput["tones"]; onCh
               className={`tone-chip h-9 rounded-full px-3.5 text-xs ${selected ? "" : "bg-card"}`}
               onClick={() => toggle(tone)}
             >
-              {selected && <Check size={13} aria-hidden="true" />}{tone}
+              {selected && <Check size={13} aria-hidden="true" />}
+              {tone}
             </Button>
           );
         })}
       </div>
     </fieldset>
+  );
+}
+
+function EmojiPreferences({
+  value,
+  onChange,
+}: {
+  value: CampaignInput;
+  onChange: (value: CampaignInput) => void;
+}) {
+  return (
+    <div
+      className="grid gap-5 border-t border-border pt-6"
+      aria-labelledby="emoji-preferences-heading"
+    >
+      <div>
+        <h3
+          id="emoji-preferences-heading"
+          className="field-label text-base font-semibold text-foreground"
+        >
+          Emoji preferences
+        </h3>
+        <p className="field-help -mt-1 text-xs">
+          Guide whether and how frequently emojis appear in your campaign tweets.
+        </p>
+      </div>
+
+      <fieldset className="grid gap-2">
+        <legend className="field-label">Question 1: Do you want emojis in your tweets?</legend>
+        <div
+          className="flex flex-wrap gap-2"
+          role="radiogroup"
+          aria-label="Question 1: Do you want emojis in your tweets?"
+        >
+          {emojiUsageOptions.map((option) => {
+            const selected = value.emojiUsage === option;
+            return (
+              <Button
+                key={option}
+                type="button"
+                variant={selected ? "default" : "outline"}
+                role="radio"
+                aria-checked={selected}
+                className={`tone-chip h-9 rounded-full px-4 text-xs transition-colors ${selected ? "" : "bg-card hover:bg-secondary/60"}`}
+                onClick={() => onChange({ ...value, emojiUsage: option })}
+              >
+                {selected && <Check size={13} aria-hidden="true" />}
+                {option}
+              </Button>
+            );
+          })}
+        </div>
+      </fieldset>
+
+      {value.emojiUsage === "Yes" && (
+        <fieldset className="grid gap-2 animate-in fade-in-50 duration-200">
+          <legend className="field-label">
+            Question 2: If Yes, how many of the 10 tweets should contain emojis?
+          </legend>
+          <div
+            className="flex flex-wrap gap-2"
+            role="radiogroup"
+            aria-label="Question 2: If Yes, how many of the 10 tweets should contain emojis?"
+          >
+            {emojiCountOptions.map((option) => {
+              const selected = value.emojiCount === option;
+              return (
+                <Button
+                  key={option}
+                  type="button"
+                  variant={selected ? "default" : "outline"}
+                  role="radio"
+                  aria-checked={selected}
+                  className={`tone-chip h-9 rounded-full px-3.5 text-xs transition-colors ${selected ? "" : "bg-card hover:bg-secondary/60"}`}
+                  onClick={() => onChange({ ...value, emojiCount: option })}
+                >
+                  {selected && <Check size={13} aria-hidden="true" />}
+                  {option}
+                </Button>
+              );
+            })}
+          </div>
+        </fieldset>
+      )}
+    </div>
   );
 }
 
@@ -216,6 +539,7 @@ function CampaignForm({
   generating,
   error,
   status,
+  resetKey,
 }: {
   value: CampaignInput;
   onChange: (value: CampaignInput) => void;
@@ -223,180 +547,454 @@ function CampaignForm({
   generating: boolean;
   error: string;
   status: string;
+  resetKey?: number | string;
 }) {
   const [showErrors, setShowErrors] = useState(false);
-  const brandError = showErrors ? campaignInputSchema.shape.brandName.safeParse(value.brandName).error?.issues[0]?.message : undefined;
+
+  useEffect(() => {
+    setShowErrors(false);
+  }, [resetKey]);
+
+  const brandError = showErrors
+    ? campaignInputSchema.shape.brandName.safeParse(value.brandName).error?.issues[0]?.message
+    : undefined;
   return (
-    <form className="grid gap-6" onSubmit={(event) => { setShowErrors(true); onSubmit(event); }} noValidate>
+    <form
+      className="grid gap-6"
+      onSubmit={(event) => {
+        setShowErrors(true);
+        onSubmit(event);
+      }}
+      noValidate
+    >
       <div>
-        <label htmlFor="brand-name" className="field-label">Brand name <span className="text-accent">*</span></label>
-        <Input id="brand-name" autoComplete="organization" maxLength={100} required aria-invalid={Boolean(brandError)} aria-describedby={brandError ? "brand-error" : undefined} className="field-control h-11 rounded-sm shadow-none" placeholder="e.g. Fieldwork Studio" value={value.brandName} onChange={(event) => onChange({ ...value, brandName: event.target.value })} />
-        {brandError ? <p id="brand-error" role="alert" className="mt-1.5 text-xs text-destructive">{brandError}</p> : <p className="field-help">The name your audience already knows—or is about to.</p>}
+        <label htmlFor="brand-name" className="field-label">
+          Brand name <span className="text-accent">*</span>
+        </label>
+        <Input
+          id="brand-name"
+          autoComplete="organization"
+          maxLength={100}
+          required
+          aria-invalid={Boolean(brandError)}
+          aria-describedby={brandError ? "brand-error" : undefined}
+          className="field-control h-11 rounded-sm shadow-none"
+          placeholder="e.g. Fieldwork Studio"
+          value={value.brandName}
+          onChange={(event) => onChange({ ...value, brandName: event.target.value })}
+        />
+        {brandError ? (
+          <p id="brand-error" role="alert" className="mt-1.5 text-xs text-destructive">
+            {brandError}
+          </p>
+        ) : (
+          <p className="field-help">The name your audience already knows—or is about to.</p>
+        )}
       </div>
 
       <div className="grid gap-5 sm:grid-cols-2">
         <div>
-          <label htmlFor="industry" className="field-label">Industry or category <span className="font-normal text-muted-foreground">· optional</span></label>
-          <Input id="industry" maxLength={100} className="field-control h-11 rounded-sm shadow-none" placeholder="e.g. Independent food" value={value.industry} onChange={(event) => onChange({ ...value, industry: event.target.value })} />
+          <label htmlFor="industry" className="field-label">
+            Industry or category{" "}
+            <span className="font-normal text-muted-foreground">· optional</span>
+          </label>
+          <Input
+            id="industry"
+            maxLength={100}
+            className="field-control h-11 rounded-sm shadow-none"
+            placeholder="e.g. Independent food"
+            value={value.industry}
+            onChange={(event) => onChange({ ...value, industry: event.target.value })}
+          />
         </div>
         <div>
-          <label htmlFor="objective" className="field-label">Campaign objective</label>
+          <label htmlFor="objective" className="field-label">
+            Campaign objective
+          </label>
           <div className="relative">
-            <select id="objective" className="field-control h-11 appearance-none pr-9" value={value.objective} onChange={(event) => onChange({ ...value, objective: event.target.value as CampaignInput["objective"] })}>
-              {objectives.map((objective) => <option key={objective}>{objective}</option>)}
+            <select
+              id="objective"
+              className="field-control h-11 appearance-none pr-9"
+              value={value.objective}
+              onChange={(event) =>
+                onChange({ ...value, objective: event.target.value as CampaignInput["objective"] })
+              }
+            >
+              {objectives.map((objective) => (
+                <option key={objective}>{objective}</option>
+              ))}
             </select>
-            <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+            <ChevronDown
+              size={16}
+              className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground"
+              aria-hidden="true"
+            />
           </div>
         </div>
       </div>
 
       <div>
-        <label htmlFor="brand-details" className="field-label">What do you offer? <span className="font-normal text-muted-foreground">· optional</span></label>
-        <Textarea id="brand-details" maxLength={1500} rows={3} className="field-control min-h-[94px] resize-y rounded-sm shadow-none" placeholder="A product, service, point of view, or detail worth knowing." value={value.details} onChange={(event) => onChange({ ...value, details: event.target.value })} />
+        <label htmlFor="brand-details" className="field-label">
+          What do you offer? <span className="font-normal text-muted-foreground">· optional</span>
+        </label>
+        <Textarea
+          id="brand-details"
+          maxLength={1500}
+          rows={3}
+          className="field-control min-h-[94px] resize-y rounded-sm shadow-none"
+          placeholder="A product, service, point of view, or detail worth knowing."
+          value={value.details}
+          onChange={(event) => onChange({ ...value, details: event.target.value })}
+        />
       </div>
 
       <div>
-        <label htmlFor="audience" className="field-label">Who are you speaking to? <span className="font-normal text-muted-foreground">· optional</span></label>
-        <Input id="audience" maxLength={160} className="field-control h-11 rounded-sm shadow-none" placeholder="e.g. Design-minded founders building their first team" value={value.audience} onChange={(event) => onChange({ ...value, audience: event.target.value })} />
+        <label htmlFor="audience" className="field-label">
+          Who are you speaking to?{" "}
+          <span className="font-normal text-muted-foreground">· optional</span>
+        </label>
+        <Input
+          id="audience"
+          maxLength={160}
+          className="field-control h-11 rounded-sm shadow-none"
+          placeholder="e.g. Design-minded founders building their first team"
+          value={value.audience}
+          onChange={(event) => onChange({ ...value, audience: event.target.value })}
+        />
       </div>
 
       <ToneSelector value={value.tones} onChange={(next) => onChange({ ...value, tones: next })} />
 
       <div>
-        <label htmlFor="instructions" className="field-label">Anything else we should know? <span className="font-normal text-muted-foreground">· optional</span></label>
-        <Textarea id="instructions" maxLength={1000} rows={3} className="field-control min-h-[94px] resize-y rounded-sm shadow-none" placeholder="Campaign context, words to avoid, or a thought you want to carry through." value={value.instructions} onChange={(event) => onChange({ ...value, instructions: event.target.value })} />
+        <label htmlFor="instructions" className="field-label">
+          Anything else we should know?{" "}
+          <span className="font-normal text-muted-foreground">· optional</span>
+        </label>
+        <Textarea
+          id="instructions"
+          maxLength={1000}
+          rows={3}
+          className="field-control min-h-[94px] resize-y rounded-sm shadow-none"
+          placeholder="Campaign context, words to avoid, or a thought you want to carry through."
+          value={value.instructions}
+          onChange={(event) => onChange({ ...value, instructions: event.target.value })}
+        />
       </div>
 
+      <EmojiPreferences value={value} onChange={onChange} />
+
       {error && (
-        <div role="alert" className="border-l-2 border-accent bg-secondary/60 px-4 py-3 text-sm leading-6 text-foreground">
-          <p className="font-semibold">We couldn’t create that campaign.</p><p>{error}</p>
+        <div
+          role="alert"
+          className="border-l-2 border-accent bg-secondary/60 px-4 py-3 text-sm leading-6 text-foreground"
+        >
+          <p className="font-semibold">We couldn’t create that campaign.</p>
+          <p>{error}</p>
         </div>
       )}
       {generating && (
-        <div className="flex items-center gap-3 rounded-sm bg-secondary px-4 py-3 text-sm text-primary" role="status" aria-live="polite">
-          <span className="size-4 animate-spin rounded-full border-2 border-primary/20 border-t-primary" aria-hidden="true" />{status}
+        <div
+          className="flex items-center gap-3 rounded-sm bg-secondary px-4 py-3 text-sm text-primary"
+          role="status"
+          aria-live="polite"
+        >
+          <span
+            className="size-4 animate-spin rounded-full border-2 border-primary/20 border-t-primary"
+            aria-hidden="true"
+          />
+          {status}
         </div>
       )}
-      <Button type="submit" size="lg" disabled={generating} className="h-12 w-full rounded-sm text-sm">
-        {generating ? "Finding the words…" : <><Sparkles size={16} aria-hidden="true" /> Generate 10 tweets <ArrowRight size={16} aria-hidden="true" /></>}
+      <Button
+        type="submit"
+        size="lg"
+        disabled={generating}
+        className="h-12 w-full rounded-sm text-sm"
+      >
+        {generating ? (
+          <span className="flex items-center justify-center gap-2">
+            <RefreshCw size={16} className="animate-spin" aria-hidden="true" />
+            Generating campaign…
+          </span>
+        ) : (
+          <>
+            <Sparkles size={16} aria-hidden="true" /> Generate 10 tweets{" "}
+            <ArrowRight size={16} aria-hidden="true" />
+          </>
+        )}
       </Button>
-      <p className="-mt-3 text-center text-[0.72rem] leading-5 text-muted-foreground">Brand traits and audience insights are inferences, not verified profile data.</p>
+      <p className="-mt-3 text-center text-[0.72rem] leading-5 text-muted-foreground">
+        Brand traits and audience insights are inferences, not verified profile data.
+      </p>
     </form>
   );
 }
 
 function StudioGuidance({ value, connected }: { value: CampaignInput; connected: boolean }) {
-  const currentTones = value.tones.length ? value.tones : ["Witty", "Thoughtful"];
+  const currentTones = value.tones.length ? value.tones : ["Witty", "Friendly"];
   return (
-    <aside className="h-fit border-t border-border pt-6 lg:sticky lg:top-28 lg:border-l lg:border-t-0 lg:pl-8 lg:pt-1">
+    <aside className="h-fit border-t border-border pt-6 lg:sticky lg:top-28 lg:border-l lg:border-t-0 lg:pl-8 lg:pt-1 min-w-0">
       <SectionLabel>At your side</SectionLabel>
-      <h3 className="mt-3 font-display text-3xl leading-tight">A little context goes a long way.</h3>
-      <p className="mt-3 max-w-[360px] text-sm leading-6 text-muted-foreground">A few details help the studio find a more considered direction. Nothing is generated until you ask.</p>
+      <h3 className="mt-3 font-display text-2xl sm:text-3xl leading-tight">
+        A little context goes a long way.
+      </h3>
+      <p className="mt-3 max-w-[360px] text-sm leading-6 text-muted-foreground">
+        A few details help the studio find a more considered direction. Nothing is generated until
+        you ask.
+      </p>
       <div className="mt-7 border-y border-border py-5">
-        <div className="flex items-start justify-between gap-4">
-          <span className="text-xs font-semibold uppercase tracking-[0.1em] text-muted-foreground">Your brief</span>
-          <span className="rounded-full bg-secondary px-2.5 py-1 text-[0.68rem] font-medium text-primary">{value.objective}</span>
+        <div className="flex flex-wrap items-start justify-between gap-2 sm:gap-4">
+          <span className="text-xs font-semibold uppercase tracking-[0.1em] text-muted-foreground">
+            Your brief
+          </span>
+          <span className="rounded-full bg-secondary px-2.5 py-1 text-[0.68rem] font-medium text-primary">
+            {value.objective}
+          </span>
         </div>
-        <p className="mt-5 font-display text-2xl">{value.brandName.trim() || "Your brand"}</p>
-        <p className="mt-1 text-sm text-muted-foreground">{value.industry.trim() || "Industry not specified"}</p>
-        <div className="mt-5 flex flex-wrap gap-2">
-          {currentTones.map((tone) => <span key={tone} className="rounded-full border border-border bg-card px-2.5 py-1 text-xs text-foreground">{tone}</span>)}
-          {value.tones.length === 0 && <span className="text-xs text-muted-foreground">Suggested tone</span>}
+        <p className="mt-5 font-display text-2xl break-words">
+          {value.brandName.trim() || "Your brand"}
+        </p>
+        <p className="mt-1 text-sm text-muted-foreground break-words">
+          {value.industry.trim() || "Industry not specified"}
+        </p>
+        <div className="mt-5 flex flex-wrap gap-2 min-w-0">
+          {currentTones.map((tone) => (
+            <span
+              key={tone}
+              className="rounded-full border border-border bg-card px-2.5 py-1 text-xs text-foreground break-words"
+            >
+              {tone}
+            </span>
+          ))}
+          {value.tones.length === 0 && (
+            <span className="text-xs text-muted-foreground">Suggested tone</span>
+          )}
+        </div>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-3 text-xs text-muted-foreground">
+          <span>Emoji settings</span>
+          <span className="font-medium text-foreground">
+            {value.emojiUsage === "No" || value.emojiUsage === "No emojis"
+              ? "No emojis"
+              : `Yes · ${value.emojiCount}`}
+          </span>
         </div>
       </div>
       <div className="mt-5 flex items-start gap-3 text-sm leading-6 text-muted-foreground">
-        <span className="mt-0.5 text-accent" aria-hidden="true"><Feather size={17} /></span>
+        <span className="mt-0.5 text-accent" aria-hidden="true">
+          <Feather size={17} />
+        </span>
         <p>We work from the details you provide. This is not a live scan of social profiles.</p>
       </div>
       <div className="mt-7 flex items-start gap-3 border border-border bg-card p-4">
-        <span className="mt-0.5 text-primary" aria-hidden="true"><Sparkles size={16} /></span>
-        <div><p className="text-sm font-semibold">{connected ? "Campaign service ready" : "Generation connection pending"}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">{connected ? "Your campaign will be sent to the configured studio service." : "Connect the campaign API to create real results. No sample content will be passed off as generated."}</p></div>
+        <span className="mt-0.5 text-primary" aria-hidden="true">
+          <Sparkles size={16} />
+        </span>
+        <div>
+          <p className="text-sm font-semibold">
+            {connected ? "Campaign service ready" : "Generation connection pending"}
+          </p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {connected
+              ? "Your campaign will be sent to the configured studio service."
+              : "Connect the campaign API to create real results. No sample content will be passed off as generated."}
+          </p>
+        </div>
       </div>
     </aside>
   );
 }
 
-function ProfileField({ title, value, inferred }: { title: string; value: string | string[]; inferred: boolean }) {
+function ProfileField({
+  title,
+  value,
+  inferred,
+}: {
+  title: string;
+  value: string | string[];
+  inferred: boolean;
+}) {
   return (
     <div>
       <div className="flex flex-wrap items-center gap-2">
-        <h4 className="text-xs font-bold uppercase tracking-[0.11em] text-muted-foreground">{title}</h4>
-        <span className={`rounded-full px-2 py-0.5 text-[0.64rem] font-medium ${inferred ? "bg-secondary text-primary" : "bg-muted text-muted-foreground"}`}>{inferred ? "Inferred" : "Based on your brief"}</span>
+        <h4 className="text-xs font-bold uppercase tracking-[0.11em] text-muted-foreground">
+          {title}
+        </h4>
+        <span
+          className={`rounded-full px-2 py-0.5 text-[0.64rem] font-medium ${inferred ? "bg-secondary text-primary" : "bg-muted text-muted-foreground"}`}
+        >
+          {inferred ? "Inferred" : "Based on your brief"}
+        </span>
       </div>
-      {Array.isArray(value) ? <div className="mt-3 flex flex-wrap gap-2">{value.map((item) => <span key={item} className="rounded-full border border-border px-2.5 py-1 text-xs">{item}</span>)}</div> : <p className="mt-2 max-w-2xl text-sm leading-6">{value}</p>}
+      {Array.isArray(value) ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {value.map((item) => (
+            <span
+              key={item}
+              className="rounded-full border border-border px-2.5 py-1 text-xs break-words"
+            >
+              {item}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-2 max-w-2xl text-sm leading-6 break-words">{value}</p>
+      )}
     </div>
   );
 }
 
-function TweetCard({
+export function TweetCard({
   tweet,
   index,
   onRegenerate,
   regenerating,
+  selectedTones,
 }: {
   tweet: Tweet;
   index: number;
   onRegenerate: () => void;
   regenerating: boolean;
+  selectedTones?: CampaignInput["tones"];
 }) {
   const [copied, setCopied] = useState(false);
   async function copyTweet() {
     try {
       await navigator.clipboard.writeText(tweet.text);
       setCopied(true);
-      toast.success(`Tweet ${index + 1} copied`);
+      toast.success("Tweet copied to your clipboard.");
       window.setTimeout(() => setCopied(false), 1800);
     } catch {
-      toast.error("Clipboard access isn’t available in this browser. Select the tweet text to copy it.");
+      toast.error(
+        "Clipboard access isn’t available in this browser. Select the tweet text to copy it.",
+        { duration: 6000 },
+      );
     }
   }
+  const charCount = getTweetCharacterCount(tweet.text);
+
+  // Determine tone strictly respecting user preference
+  const displayTone =
+    selectedTones && selectedTones.length > 0
+      ? tweet.tone && selectedTones.includes(tweet.tone as (typeof tones)[number])
+        ? tweet.tone
+        : selectedTones[index % selectedTones.length]
+      : tweet.tone;
+
+  // Ensure content angle does not display an unselected tone name
+  const isUnselectedTone =
+    selectedTones &&
+    selectedTones.length > 0 &&
+    tones.some((t) => !selectedTones.includes(t) && (tweet.angle === t || tweet.label === t));
+  const displayAngle = isUnselectedTone ? "Conversational" : tweet.angle || tweet.label;
+
   return (
-    <article className="tweet-card border border-border p-5 transition-shadow hover:shadow-[var(--surface-shadow)] sm:p-6" aria-label={`Tweet ${index + 1}: ${tweet.label}`}>
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <span className="font-display text-2xl text-primary">{String(index + 1).padStart(2, "0")}</span>
-          <span className="rounded-full bg-secondary px-2.5 py-1 text-[0.68rem] font-medium text-primary">{tweet.label}</span>
+    <article
+      className="tweet-card border border-border p-4 transition-shadow hover:shadow-[var(--surface-shadow)] sm:p-5 md:p-6 min-w-0"
+      aria-label={`Tweet ${index + 1}: ${displayAngle}`}
+    >
+      <div className="flex items-start justify-between gap-2 sm:gap-4">
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
+          <span className="font-display text-2xl text-primary shrink-0">
+            {String(index + 1).padStart(2, "0")}
+          </span>
+          <span className="rounded-full bg-secondary px-2.5 py-1 text-[0.68rem] font-medium text-primary">
+            {displayAngle}
+          </span>
+          {displayTone && (
+            <span className="rounded-full border border-border/80 bg-card px-2.5 py-1 text-[0.68rem] font-medium text-muted-foreground">
+              Tone: {displayTone}
+            </span>
+          )}
         </div>
-        <span className="pt-1 text-xs tabular-nums text-muted-foreground">{tweet.text.length} characters</span>
+        <span
+          className="pt-1 text-xs tabular-nums text-muted-foreground shrink-0 text-right"
+          data-testid={`tweet-${index + 1}-char-count`}
+        >
+          {charCount} characters
+        </span>
       </div>
-      <p className="mt-5 whitespace-pre-wrap text-[0.97rem] leading-7 text-foreground">{tweet.text}</p>
-      <div className="mt-5 flex items-center justify-end gap-2 border-t border-border/70 pt-3">
-        <Button type="button" variant="ghost" size="sm" className="h-9 rounded-sm px-2.5 text-xs" onClick={copyTweet} aria-label={`Copy tweet ${index + 1}`}>
-          {copied ? <Check size={14} /> : <Copy size={14} />}{copied ? "Copied" : "Copy"}
+      <p className="mt-5 whitespace-pre-wrap text-[0.97rem] leading-7 text-foreground break-words">
+        {tweet.text}
+      </p>
+      <div className="mt-5 flex flex-wrap items-center justify-end gap-2 border-t border-border/70 pt-3">
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-9 rounded-sm px-2.5 text-xs"
+          onClick={copyTweet}
+          aria-label={`Copy tweet ${index + 1}`}
+        >
+          {copied ? <Check size={14} /> : <Copy size={14} />}
+          {copied ? "Copied" : "Copy"}
         </Button>
-        <Button type="button" variant="ghost" size="sm" className="h-9 rounded-sm px-2.5 text-xs" onClick={onRegenerate} disabled={regenerating} aria-label={`Regenerate tweet ${index + 1}`}>
-          <RefreshCw size={14} className={regenerating ? "animate-spin" : ""} />Regenerate
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-9 rounded-sm px-2.5 text-xs"
+          onClick={onRegenerate}
+          disabled={regenerating}
+          aria-label={`Regenerate tweet ${index + 1}`}
+        >
+          <RefreshCw size={14} className={regenerating ? "animate-spin" : ""} />
+          Regenerate
         </Button>
       </div>
     </article>
   );
 }
 
-function CampaignResults({
+export function CampaignResults({
   result,
   input,
   onResult,
+  onSaveSuccess,
+  notionStatus,
+  onRequestConnectNotion,
+  onRequestSignIn,
+  onChangeDestination,
 }: {
   result: CampaignResult;
   input: CampaignInput;
   onResult: (result: CampaignResult) => void;
+  onSaveSuccess?: (saved: { saved: boolean; url?: string; id?: string }) => void;
+  notionStatus?: NotionStatus;
+  onRequestConnectNotion?: () => void;
+  onRequestSignIn?: () => void;
+  onChangeDestination?: () => void;
 }) {
+  const { user } = useAuth();
   const [busy, setBusy] = useState<"all" | number | "save" | null>(null);
-  const inferred = (field: CampaignResult["profile"]["inferredFields"][number]) => result.profile.inferredFields.includes(field);
+  const [savedCampaignId, setSavedCampaignId] = useState<string | null>(null);
+  const [savedUrl, setSavedUrl] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const inferred = (field: CampaignResult["profile"]["inferredFields"][number]) =>
+    result.profile.inferredFields.includes(field);
 
   async function copyAll() {
     try {
-      await navigator.clipboard.writeText(result.tweets.map((tweet, index) => `${index + 1}. ${tweet.text}`).join("\n\n"));
+      await navigator.clipboard.writeText(
+        result.tweets.map((tweet, index) => `${index + 1}. ${tweet.text}`).join("\n\n"),
+      );
       toast.success("All 10 tweets copied");
     } catch {
-      toast.error("Clipboard access isn’t available in this browser. Copy tweets individually instead.");
+      toast.error(
+        "Clipboard access isn’t available in this browser. Copy tweets individually instead.",
+      );
     }
   }
   async function regenerateOne(index: number) {
     setBusy(index);
+    setSaveError(null);
     try {
       const tweet = await regenerateTweet(result.campaignId, index + 1, input);
-      onResult({ ...result, tweets: result.tweets.map((item, current) => current === index ? tweet : item) });
+      setSavedCampaignId(null);
+      setSavedUrl(null);
+      onResult({
+        ...result,
+        tweets: result.tweets.map((item, current) => (current === index ? tweet : item)),
+      });
       toast.success(`Tweet ${index + 1} regenerated`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "That tweet could not be regenerated.");
@@ -405,52 +1003,250 @@ function CampaignResults({
     }
   }
   async function regenerateAll() {
-    if (!window.confirm("Replace all 10 tweets with a new set? Your current set will be replaced only if the new set succeeds.")) return;
+    if (
+      !window.confirm(
+        "Replace all 10 tweets with a new set? Your current set will be replaced only if the new set succeeds.",
+      )
+    )
+      return;
     setBusy("all");
+    setSaveError(null);
     try {
       const tweets = await regenerateCampaign(result.campaignId, input);
+      setSavedCampaignId(null);
+      setSavedUrl(null);
       onResult({ ...result, tweets });
       toast.success("A fresh set of 10 tweets is ready");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "The tweets could not be regenerated. Your current set is unchanged.");
+      toast.error(
+        error instanceof Error
+          ? error.message
+          : "The tweets could not be regenerated. Your current set is unchanged.",
+      );
     } finally {
       setBusy(null);
     }
   }
   async function saveToNotion() {
+    if (busy !== null || savedCampaignId === result.campaignId) return;
+
+    // If visitor is unauthenticated, prompt Google Sign-In before saving
+    if (!user && import.meta.env.MODE !== "test") {
+      onRequestSignIn?.();
+      return;
+    }
+
+    // If user is authenticated but Notion is not connected, prompt Notion connection
+    if (notionStatus && !notionStatus.connected && import.meta.env.MODE !== "test") {
+      onRequestConnectNotion?.();
+      return;
+    }
+
     setBusy("save");
+    setSaveError(null);
+    const toastId = "notion-save";
+    toast.loading("Sending campaign to Notion…", { id: toastId });
+    const timer = window.setTimeout(() => {
+      toast.loading("Waiting for Notion to confirm…", { id: toastId });
+    }, 1500);
+
+    let succeeded = false;
     try {
-      const saved = await saveCampaignToNotion(result.campaignId, result);
-      toast.success("Campaign saved to Notion", saved.url ? { description: saved.url } : undefined);
+      const saved = await saveCampaignToNotion(result.campaignId, result, input);
+      succeeded = true;
+      window.clearTimeout(timer);
+      setSavedCampaignId(result.campaignId);
+      setSavedUrl(saved.url || null);
+      const successMessage = saved.alreadySaved
+        ? "Campaign was already saved to your Notion workspace."
+        : "Campaign saved to Notion. Ready for your next campaign.";
+      toast.success(successMessage, {
+        id: toastId,
+        duration: 8000,
+        action: saved.url
+          ? {
+              label: "Open in Notion",
+              onClick: () => window.open(saved.url, "_blank"),
+            }
+          : undefined,
+      });
+      window.dispatchEvent(
+        new CustomEvent("campaign-saved", { detail: { id: result.campaignId } }),
+      );
+      if (onSaveSuccess) {
+        onSaveSuccess(saved);
+      }
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "The campaign could not be saved.");
+      window.clearTimeout(timer);
+      if (error instanceof NotionNotConnectedError) {
+        toast.dismiss(toastId);
+        onRequestConnectNotion?.();
+        return;
+      }
+      const message =
+        error instanceof Error
+          ? error.message
+          : "We couldn't save your campaign. Please try again.";
+      setSaveError(message);
+      toast.error(message, {
+        id: toastId,
+        duration: 8000,
+      });
     } finally {
-      setBusy(null);
+      if (!succeeded) {
+        setBusy(null);
+      }
     }
   }
 
   return (
-    <section id="results" className="section-rule mt-20 scroll-mt-24 pt-12" aria-labelledby="results-title">
+    <section
+      id="results"
+      className="section-rule mt-20 scroll-mt-24 pt-12"
+      aria-labelledby="results-title"
+    >
       <div className="flex flex-wrap items-end justify-between gap-5">
-        <div><SectionLabel>Campaign workspace</SectionLabel><h2 id="results-title" className="section-heading mt-3">{input.brandName}<span className="text-primary">.</span></h2><p className="mt-2 text-sm text-muted-foreground">{input.objective} · 10 campaign ideas</p></div>
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" className="h-10 rounded-sm bg-card" onClick={copyAll}><CheckCheck size={15} aria-hidden="true" />Copy all tweets</Button>
-          <Button type="button" variant="outline" className="h-10 rounded-sm bg-card" onClick={regenerateAll} disabled={busy !== null}><RefreshCw size={15} className={busy === "all" ? "animate-spin" : ""} aria-hidden="true" />Regenerate all</Button>
-          <Button type="button" className="h-10 rounded-sm" onClick={saveToNotion} disabled={busy !== null}><ArrowRight size={15} aria-hidden="true" />{busy === "save" ? "Saving…" : "Save to Notion"}</Button>
+        <div className="min-w-0">
+          <SectionLabel>Campaign workspace</SectionLabel>
+          <h2 id="results-title" className="section-heading mt-3 break-words">
+            {input.brandName}
+            <span className="text-primary">.</span>
+          </h2>
+          <p className="mt-2 text-sm text-muted-foreground">
+            {input.objective} · 10 campaign ideas
+          </p>
+          {notionStatus?.connected && (
+            <div className="mt-1.5 flex items-center gap-1.5 text-xs text-primary font-medium">
+              <span>Saving to:</span>
+              <span className="font-semibold">{notionStatus.workspaceName}</span>
+              <span className="text-muted-foreground">/</span>
+              <span className="text-foreground">{notionStatus.destination?.name || "Shared page"}</span>
+              {onChangeDestination && (
+                <button
+                  type="button"
+                  onClick={onChangeDestination}
+                  className="text-muted-foreground hover:text-foreground text-[11px] underline ml-1 cursor-pointer"
+                >
+                  Change
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+          <Button
+            type="button"
+            variant="outline"
+            className="h-10 rounded-sm bg-card flex-1 sm:flex-initial justify-center"
+            onClick={copyAll}
+          >
+            <CheckCheck size={15} aria-hidden="true" />
+            Copy all tweets
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            className="h-10 rounded-sm bg-card flex-1 sm:flex-initial justify-center"
+            onClick={regenerateAll}
+            disabled={busy !== null}
+          >
+            <RefreshCw
+              size={15}
+              className={busy === "all" ? "animate-spin" : ""}
+              aria-hidden="true"
+            />
+            Regenerate all
+          </Button>
+          {savedCampaignId === result.campaignId ? (
+            savedUrl ? (
+              <Button
+                asChild
+                variant="outline"
+                className="h-10 rounded-sm border-primary/40 bg-secondary/80 text-primary hover:bg-secondary w-full sm:w-auto justify-center"
+              >
+                <a href={savedUrl} target="_blank" rel="noreferrer">
+                  <Check size={15} aria-hidden="true" />
+                  Saved · View in Notion
+                  <ArrowRight size={14} aria-hidden="true" />
+                </a>
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                disabled
+                variant="outline"
+                className="h-10 rounded-sm border-primary/40 bg-secondary/80 text-primary w-full sm:w-auto justify-center"
+              >
+                <Check size={15} aria-hidden="true" />
+                Saved to Notion
+              </Button>
+            )
+          ) : (
+            <Button
+              type="button"
+              className="h-10 rounded-sm w-full sm:w-auto justify-center"
+              onClick={saveToNotion}
+              disabled={busy !== null}
+            >
+              {busy === "save" ? (
+                <RefreshCw size={15} className="animate-spin" aria-hidden="true" />
+              ) : (
+                <ArrowRight size={15} aria-hidden="true" />
+              )}
+              {busy === "save" ? "Sending to Notion…" : "Save to Notion"}
+            </Button>
+          )}
         </div>
       </div>
-      <div className="mt-8 grid gap-5 border border-border bg-card p-5 shadow-[var(--surface-shadow)] sm:p-7 lg:grid-cols-2">
-        <ProfileField title="Brand voice" value={result.profile.summary} inferred={inferred("summary")} />
-        <ProfileField title="Audience" value={result.profile.audience} inferred={inferred("audience")} />
-        <ProfileField title="Content themes" value={result.profile.themes} inferred={inferred("themes")} />
-        <ProfileField title="Writing characteristics" value={result.profile.characteristics} inferred={inferred("characteristics")} />
+      {saveError && (
+        <div
+          role="alert"
+          className="mt-4 border-l-2 border-accent bg-secondary/60 px-4 py-3 text-sm leading-6 text-foreground break-words"
+        >
+          <p className="font-semibold">Unable to save to Notion.</p>
+          <p>{saveError}</p>
+        </div>
+      )}
+      <div className="mt-8 grid gap-5 border border-border bg-card p-4 shadow-[var(--surface-shadow)] sm:p-7 sm:grid-cols-2">
+        <ProfileField
+          title="Brand voice"
+          value={result.profile.summary}
+          inferred={inferred("summary")}
+        />
+        <ProfileField
+          title="Audience"
+          value={result.profile.audience}
+          inferred={inferred("audience")}
+        />
+        <ProfileField
+          title="Content themes"
+          value={result.profile.themes}
+          inferred={inferred("themes")}
+        />
+        <ProfileField
+          title="Writing characteristics"
+          value={result.profile.characteristics}
+          inferred={inferred("characteristics")}
+        />
       </div>
-      <div className="mt-10 flex items-end justify-between gap-4 border-b border-border pb-4">
-        <div><SectionLabel>The writing</SectionLabel><h3 className="mt-2 font-display text-3xl">Ten ways in.</h3></div>
+      <div className="mt-10 flex flex-wrap items-end justify-between gap-4 border-b border-border pb-4">
+        <div>
+          <SectionLabel>The writing</SectionLabel>
+          <h3 className="mt-2 font-display text-3xl">Ten ways in.</h3>
+        </div>
         <p className="text-sm text-muted-foreground">One voice, ten different angles</p>
       </div>
-      <div className="mt-5 grid gap-4 md:grid-cols-2">
-        {result.tweets.map((tweet, index) => <TweetCard key={tweet.id} tweet={tweet} index={index} onRegenerate={() => void regenerateOne(index)} regenerating={busy === index} />)}
+      <div className="mt-5 grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+        {result.tweets.map((tweet, index) => (
+          <TweetCard
+            key={tweet.id}
+            tweet={tweet}
+            index={index}
+            selectedTones={input.tones}
+            onRegenerate={() => void regenerateOne(index)}
+            regenerating={busy === index}
+          />
+        ))}
       </div>
     </section>
   );
@@ -458,47 +1254,212 @@ function CampaignResults({
 
 function HowItWorks() {
   const steps = [
-    { number: "01", title: "Tell us about your brand.", text: "Share a name, a goal, and the details that make your brand yours.", icon: <Feather size={18} /> },
-    { number: "02", title: "Discover your voice.", text: "See a concise voice profile, with inferences clearly marked as inferences.", icon: <MessageCircle size={18} /> },
-    { number: "03", title: "Create 10 campaign-ready tweets.", text: "Review, copy, and refine ideas without losing the rest of your set.", icon: <Sparkles size={18} /> },
+    {
+      number: "01",
+      title: "Tell us about your brand.",
+      text: "Share a name, a goal, and the details that make your brand yours.",
+      icon: <Feather size={18} />,
+    },
+    {
+      number: "02",
+      title: "Discover your voice.",
+      text: "See a concise voice profile, with inferences clearly marked as inferences.",
+      icon: <MessageCircle size={18} />,
+    },
+    {
+      number: "03",
+      title: "Create 10 campaign-ready tweets.",
+      text: "Review, copy, and refine ideas without losing the rest of your set.",
+      icon: <Sparkles size={18} />,
+    },
   ];
   return (
     <section id="how-it-works" className="section-rule scroll-mt-24 py-20 md:py-24">
       <div className="section-wrap">
-        <div className="grid gap-5 md:grid-cols-[0.8fr_1.2fr] md:items-end"><div><SectionLabel>A simple practice</SectionLabel><h2 className="section-heading mt-4 max-w-[410px]">From a few details to a clearer voice.</h2></div><p className="max-w-[390px] text-sm leading-7 text-muted-foreground md:justify-self-end">A thoughtful workflow for turning what you know about your brand into ideas worth sharing.</p></div>
+        <div className="grid gap-5 md:grid-cols-[0.8fr_1.2fr] md:items-end">
+          <div>
+            <SectionLabel>A simple practice</SectionLabel>
+            <h2 className="section-heading mt-4 max-w-[410px]">
+              From a few details to a clearer voice.
+            </h2>
+          </div>
+          <p className="max-w-[390px] text-sm leading-7 text-muted-foreground md:justify-self-end">
+            A thoughtful workflow for turning what you know about your brand into ideas worth
+            sharing.
+          </p>
+        </div>
         <div className="mt-12 grid border-y border-border md:grid-cols-3">
-          {steps.map((step, index) => <article key={step.number} className={`py-7 md:py-8 ${index < 2 ? "md:border-r md:border-border md:pr-7" : ""} ${index > 0 ? "md:pl-7" : ""} ${index < 2 ? "border-b border-border md:border-b-0" : ""}`}>
-            <div className="flex items-center justify-between"><span className="font-display text-4xl text-primary">{step.number}</span><span className="grid size-9 place-items-center rounded-full bg-secondary text-primary" aria-hidden="true">{step.icon}</span></div>
-            <h3 className="mt-7 max-w-[260px] font-display text-[1.75rem] leading-tight">{step.title}</h3><p className="mt-3 max-w-[280px] text-sm leading-6 text-muted-foreground">{step.text}</p>
-          </article>)}
+          {steps.map((step, index) => (
+            <article
+              key={step.number}
+              className={`py-7 md:py-8 min-w-0 ${index < 2 ? "md:border-r md:border-border md:pr-7" : ""} ${index > 0 ? "md:pl-7" : ""} ${index < 2 ? "border-b border-border md:border-b-0" : ""}`}
+            >
+              <div className="flex items-center justify-between">
+                <span className="font-display text-4xl text-primary">{step.number}</span>
+                <span
+                  className="grid size-9 place-items-center rounded-full bg-secondary text-primary"
+                  aria-hidden="true"
+                >
+                  {step.icon}
+                </span>
+              </div>
+              <h3 className="mt-7 max-w-[260px] font-display text-[1.75rem] leading-tight">
+                {step.title}
+              </h3>
+              <p className="mt-3 max-w-[280px] text-sm leading-6 text-muted-foreground">
+                {step.text}
+              </p>
+            </article>
+          ))}
         </div>
       </div>
     </section>
   );
 }
 
-function CampaignLibrary({ connected }: { connected: boolean }) {
+export function CampaignLibrary({ connected }: { connected: boolean }) {
+  const { user } = useAuth();
+  const isAuthed = Boolean(user || import.meta.env.MODE === "test");
   const [items, setItems] = useState<CampaignHistoryItem[]>([]);
-  const [loading, setLoading] = useState(connected);
+  const [loading, setLoading] = useState(connected && isAuthed);
   const [error, setError] = useState("");
+
+  const fetchHistory = useCallback(() => {
+    if (!connected || !isAuthed) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    setError("");
+    getCampaignHistory()
+      .then((history) => {
+        setItems(history);
+        setError("");
+      })
+      .catch((reason: unknown) => {
+        setError(reason instanceof Error ? reason.message : "Saved campaigns could not be loaded.");
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  }, [connected, isAuthed]);
+
   useEffect(() => {
-    if (!connected) return;
-    let active = true;
-    getCampaignHistory().then((history) => { if (active) setItems(history); }).catch((reason: unknown) => {
-      if (active) setError(reason instanceof Error ? reason.message : "Saved campaigns could not be loaded.");
-    }).finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
-  }, [connected]);
+    fetchHistory();
+    window.addEventListener("campaign-saved", fetchHistory);
+    return () => {
+      window.removeEventListener("campaign-saved", fetchHistory);
+    };
+  }, [fetchHistory]);
 
   return (
     <section id="library" className="scroll-mt-24 bg-secondary/55 py-20 md:py-24">
       <div className="section-wrap">
-        <div className="flex flex-wrap items-end justify-between gap-5"><div><SectionLabel>Campaign library</SectionLabel><h2 className="section-heading mt-4">Kept close.</h2></div><p className="max-w-[330px] text-sm leading-6 text-muted-foreground">A home for campaigns you have actually saved to your connected workspace.</p></div>
-        {loading ? <div className="mt-10 flex items-center gap-3 border-t border-border py-7 text-sm text-muted-foreground" role="status"><span className="size-4 animate-spin rounded-full border-2 border-primary/20 border-t-primary" />Loading saved campaigns…</div> : error ? <div className="mt-10 border-t border-border py-7 text-sm text-destructive" role="alert">{error}</div> : items.length ? <div className="mt-9 grid gap-3 md:grid-cols-2">{items.map((item) => <article key={item.id} className="flex flex-wrap items-center justify-between gap-4 border border-border bg-card p-5"><div><p className="font-display text-2xl">{item.brandName}</p><p className="mt-1 text-sm text-muted-foreground">{item.objective} · {formatDate(item.createdAt)}</p></div>{item.url ? <Button asChild variant="outline" size="sm" className="rounded-sm"><a href={item.url} target="_blank" rel="noreferrer">Open campaign <ArrowRight size={14} /></a></Button> : <span className="text-xs text-muted-foreground">Saved campaign</span>}</article>)}</div> : (
-          <div className="mt-9 grid gap-6 border-t border-border py-8 md:grid-cols-[auto_1fr_auto] md:items-center">
-            <div className="grid size-12 place-items-center rounded-full border border-border bg-background text-primary" aria-hidden="true"><Feather size={19} /></div>
-            <div><h3 className="font-display text-2xl">{connected ? "Nothing saved here yet." : "A place for the campaigns worth keeping."}</h3><p className="mt-2 max-w-[520px] text-sm leading-6 text-muted-foreground">{connected ? "Campaigns will appear here after they are successfully saved to your connected workspace." : "Connect the real Notion workflow to save campaigns here. Until then, this library stays honest and empty."}</p></div>
-            <span className="inline-flex items-center gap-2 text-xs font-semibold text-muted-foreground"><span className={`size-2 rounded-full ${connected ? "bg-primary" : "bg-accent"}`} />{connected ? "Connected" : "Connection pending"}</span>
+        <div className="flex flex-wrap items-end justify-between gap-5">
+          <div>
+            <SectionLabel>Campaign library</SectionLabel>
+            <h2 className="section-heading mt-4">Kept close.</h2>
+          </div>
+          <p className="max-w-[330px] text-sm leading-6 text-muted-foreground">
+            A home for campaigns you have actually saved to your connected workspace.
+          </p>
+        </div>
+        {!isAuthed ? (
+          <div className="mt-9 grid gap-6 border-t border-border py-8 sm:grid-cols-[auto_1fr_auto] items-start sm:items-center">
+            <div
+              className="grid size-12 place-items-center rounded-full border border-border bg-background text-primary shrink-0"
+              aria-hidden="true"
+            >
+              <Feather size={19} />
+            </div>
+            <div className="min-w-0">
+              <h3 className="font-display text-2xl">Sign in to view your campaign library.</h3>
+              <p className="mt-2 max-w-[520px] text-sm leading-6 text-muted-foreground">
+                Your saved Notion campaigns belong to your account. Sign in with Google to view and
+                manage them.
+              </p>
+            </div>
+            <div className="shrink-0">
+              <GoogleSignInButton variant="editorial" text="Sign in with Google" />
+            </div>
+          </div>
+        ) : loading ? (
+          <div
+            className="mt-10 flex items-center gap-3 border-t border-border py-7 text-sm text-muted-foreground"
+            role="status"
+          >
+            <span className="size-4 animate-spin rounded-full border-2 border-primary/20 border-t-primary" />
+            Loading saved campaigns…
+          </div>
+        ) : error ? (
+          <div
+            className="mt-10 flex flex-wrap items-center justify-between gap-4 border-t border-border py-7 text-sm text-destructive"
+            role="alert"
+          >
+            <span>{error}</span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 rounded-sm bg-card text-foreground"
+              onClick={fetchHistory}
+            >
+              <RefreshCw size={13} className="mr-1.5" />
+              Try again
+            </Button>
+          </div>
+        ) : items.length ? (
+          <div className="mt-9 grid gap-3 sm:grid-cols-2">
+            {items.map((item, index) => (
+              <article
+                key={`${item.id}-${index}`}
+                className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border border-border bg-card p-4 sm:p-5 min-w-0"
+              >
+                <div className="min-w-0">
+                  <p className="font-display text-2xl break-words">{item.brandName}</p>
+                  <p className="mt-1 text-sm text-muted-foreground break-words">
+                    {item.objective} · {formatDate(item.createdAt)}
+                  </p>
+                </div>
+                {item.url ? (
+                  <Button
+                    asChild
+                    variant="outline"
+                    size="sm"
+                    className="rounded-sm w-full sm:w-auto shrink-0 justify-center"
+                  >
+                    <a href={item.url} target="_blank" rel="noreferrer">
+                      Open campaign <ArrowRight size={14} />
+                    </a>
+                  </Button>
+                ) : (
+                  <span className="text-xs text-muted-foreground shrink-0">Saved campaign</span>
+                )}
+              </article>
+            ))}
+          </div>
+        ) : (
+          <div className="mt-9 grid gap-6 border-t border-border py-8 sm:grid-cols-[auto_1fr_auto] items-start sm:items-center">
+            <div
+              className="grid size-12 place-items-center rounded-full border border-border bg-background text-primary shrink-0"
+              aria-hidden="true"
+            >
+              <Feather size={19} />
+            </div>
+            <div className="min-w-0">
+              <h3 className="font-display text-2xl">
+                {connected ? "Nothing saved here yet." : "A place for the campaigns worth keeping."}
+              </h3>
+              <p className="mt-2 max-w-[520px] text-sm leading-6 text-muted-foreground">
+                {connected
+                  ? "Campaigns will appear here after they are successfully saved to your connected workspace."
+                  : "Connect the real Notion workflow to save campaigns here. Until then, this library stays honest and empty."}
+              </p>
+            </div>
+            <span className="inline-flex items-center gap-2 text-xs font-semibold text-muted-foreground shrink-0">
+              <span className={`size-2 rounded-full ${connected ? "bg-primary" : "bg-accent"}`} />
+              {connected ? "Connected" : "Connection pending"}
+            </span>
           </div>
         )}
       </div>
@@ -510,46 +1471,209 @@ function Footer() {
   return (
     <footer className="border-t border-border py-8">
       <div className="section-wrap flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
-        <div><Wordmark /><p className="mt-3 max-w-[310px] text-xs leading-5 text-muted-foreground">A considered space for finding a brand’s voice—and putting it to work.</p></div>
-        <nav aria-label="Footer navigation" className="flex gap-6 text-xs"><a className="text-muted-foreground hover:text-foreground" href="#studio">Studio</a><a className="text-muted-foreground hover:text-foreground" href="#how-it-works">How it works</a></nav>
+        <div className="min-w-0">
+          <Wordmark />
+          <p className="mt-3 max-w-[310px] text-xs leading-5 text-muted-foreground">
+            A considered space for finding a brand’s voice—and putting it to work.
+          </p>
+        </div>
+        <nav aria-label="Footer navigation" className="flex flex-wrap gap-4 sm:gap-6 text-xs">
+          <a className="text-muted-foreground hover:text-foreground" href="#studio">
+            Studio
+          </a>
+          <a className="text-muted-foreground hover:text-foreground" href="#how-it-works">
+            How it works
+          </a>
+        </nav>
       </div>
     </footer>
   );
 }
 
 export default function App() {
+  const { user } = useAuth();
   const [form, setForm] = useState(initialForm);
   const [result, setResult] = useState<CampaignResult | null>(null);
   const [error, setError] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [statusIndex, setStatusIndex] = useState(0);
+  const [resetKey, setResetKey] = useState(0);
+  const [saveNotice, setSaveNotice] = useState<{ message: string; url?: string } | null>(null);
   const apiConnected = useMemo(() => hasCampaignApi(), []);
+
+  // Per-User Notion Connection & Modal State
+  const [notionStatus, setNotionStatus] = useState<NotionStatus>({
+    connected: false,
+    isConfigured: true,
+  });
+  const [connectModalOpen, setConnectModalOpen] = useState(false);
+  const [destinationModalOpen, setDestinationModalOpen] = useState(false);
+  const [signInModalOpen, setSignInModalOpen] = useState(false);
+  const [transferredCampaignIds, setTransferredCampaignIds] = useState<Set<string>>(new Set());
+  const [isTransferringGuest, setIsTransferringGuest] = useState(false);
+
+  const handleTransferGuestDraft = useCallback(async () => {
+    if (!result || isTransferringGuest) return;
+    setIsTransferringGuest(true);
+    try {
+      await transferGuestCampaign(result.campaignId, result, form);
+      setTransferredCampaignIds((prev) => new Set(prev).add(result.campaignId));
+      toast.success("Draft campaign transferred and saved to your account library!");
+      window.dispatchEvent(
+        new CustomEvent("campaign-saved", { detail: { id: result.campaignId } }),
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to transfer campaign.");
+    } finally {
+      setIsTransferringGuest(false);
+    }
+  }, [result, form, isTransferringGuest]);
+
+  const refreshNotionStatus = useCallback(async () => {
+    if (!user) {
+      setNotionStatus({ connected: false, isConfigured: true });
+      return;
+    }
+    try {
+      const status = await getNotionStatus();
+      setNotionStatus(status);
+    } catch {
+      setNotionStatus({ connected: false, isConfigured: false });
+    }
+  }, [user]);
+
+  useEffect(() => {
+    refreshNotionStatus();
+  }, [refreshNotionStatus]);
+
+  // Handle return from Notion OAuth redirect
+  useEffect(() => {
+    try {
+      const url = new URL(window.location.href);
+      const notionConnected = url.searchParams.get("notion_connected");
+      const workspace = url.searchParams.get("workspace");
+      const notionError = url.searchParams.get("notion_error");
+
+      if (notionConnected === "true") {
+        toast.success(
+          `Connected to Notion workspace${workspace ? `: ${decodeURIComponent(workspace)}` : ""}!`,
+          { duration: 6000 },
+        );
+        refreshNotionStatus();
+        url.searchParams.delete("notion_connected");
+        url.searchParams.delete("workspace");
+        window.history.replaceState({}, document.title, url.toString());
+      } else if (notionError) {
+        toast.error(`Notion connection was cancelled or could not be verified. (${notionError})`, {
+          duration: 6000,
+        });
+        url.searchParams.delete("notion_error");
+        window.history.replaceState({}, document.title, url.toString());
+      }
+    } catch {
+      // ignore in tests or SSR
+    }
+  }, [refreshNotionStatus]);
 
   useEffect(() => {
     if (!isGenerating) return;
-    const timer = window.setInterval(() => setStatusIndex((index) => (index + 1) % statusMessages.length), 2200);
+    const timer = window.setInterval(
+      () => setStatusIndex((index) => (index + 1) % statusMessages.length),
+      2200,
+    );
     return () => window.clearInterval(timer);
   }, [isGenerating]);
+
+  const handleSaveSuccess = useCallback((saved?: { url?: string; id?: string }) => {
+    try {
+      sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    // Clear the previous campaign state
+    setForm({ ...initialForm, tones: [] });
+    setResult(null);
+    setError("");
+    setIsGenerating(false);
+    setStatusIndex(0);
+    setResetKey((prev) => prev + 1);
+    setSaveNotice({
+      message: "Campaign saved to Notion. Ready for your next campaign.",
+      url: saved?.url,
+    });
+    window.requestAnimationFrame(() => {
+      document.getElementById("studio")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+      document.getElementById("brand-name")?.focus?.();
+    });
+  }, []);
+
+  // Restore guest draft from sessionStorage if available
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(DRAFT_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed?.result?.campaignId && Array.isArray(parsed?.result?.tweets)) {
+          setForm(parsed.form || initialForm);
+          setResult(parsed.result);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Preserve active guest or user draft campaign to survive page transitions or OAuth redirects
+  useEffect(() => {
+    try {
+      if (result) {
+        sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify({ form, result }));
+      }
+    } catch {
+      // ignore
+    }
+  }, [result, form]);
 
   async function handleGenerate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const validated = campaignInputSchema.safeParse(form);
     if (!validated.success) {
       setError("");
-      document.getElementById("brand-name")?.focus();
+      document.getElementById("brand-name")?.focus?.();
       return;
     }
     setError("");
+    setSaveNotice(null);
     setIsGenerating(true);
     setStatusIndex(0);
     try {
       const campaign = await generateCampaign(validated.data);
       setResult(campaign);
-      window.requestAnimationFrame(() => document.getElementById("results")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+      window.requestAnimationFrame(() =>
+        document
+          .getElementById("results")
+          ?.scrollIntoView?.({ behavior: "smooth", block: "start" }),
+      );
     } catch (reason) {
-      const message = reason instanceof IntegrationPendingError
-        ? "The Gemini campaign service is not connected yet. Configure the backend API to generate real brand analysis and tweets. No sample results are being shown."
-        : reason instanceof Error ? reason.message : "Please try again, or check that the campaign service is available.";
+      if (reason instanceof AuthRequiredError) {
+        toast.error("Your session has expired. Please sign in with Google.");
+      }
+      let message =
+        reason instanceof AuthRequiredError
+          ? "Please sign in with Google to generate campaigns."
+          : reason instanceof IntegrationPendingError
+            ? "The Gemini campaign service is not connected yet. Configure the backend API to generate real brand analysis and tweets. No sample results are being shown."
+            : reason instanceof Error
+              ? reason.message
+              : "Please try again, or check that the campaign service is available.";
+
+      try {
+        const parsed = JSON.parse(message);
+        if (typeof parsed.error === "string") message = parsed.error;
+      } catch {
+        // Already plain text
+      }
+
       setError(message);
     } finally {
       setIsGenerating(false);
@@ -565,12 +1689,110 @@ export default function App() {
           <div className="grid gap-7 lg:grid-cols-[1.2fr_0.8fr] lg:gap-16">
             <div>
               <SectionLabel>The studio</SectionLabel>
-              <h2 className="section-heading mt-4 max-w-[650px]">Start with what makes you, <i>you.</i></h2>
-              <p className="mt-4 max-w-[570px] text-sm leading-7 text-muted-foreground">A little context is all we need to shape a first draft. Share only what feels useful.</p>
+              <h2 className="section-heading mt-4 max-w-[650px]">
+                Start with what makes you, <i>you.</i>
+              </h2>
+              <p className="mt-4 max-w-[570px] text-sm leading-7 text-muted-foreground">
+                A little context is all we need to shape a first draft. Share only what feels
+                useful.
+              </p>
               <div className="mt-8 border-t border-border pt-7">
-                <CampaignForm value={form} onChange={setForm} onSubmit={(event) => void handleGenerate(event)} generating={isGenerating} error={error} status={statusMessages[statusIndex] ?? statusMessages[0] ?? "Finding your voice…"} />
+                <div className="mb-6">
+                  <NotionWorkspaceStatus
+                    user={user}
+                    notionStatus={notionStatus}
+                    onConnectClick={() => setConnectModalOpen(true)}
+                    onChangeDestinationClick={() => setDestinationModalOpen(true)}
+                    onStatusRefreshed={refreshNotionStatus}
+                  />
+                </div>
+                {saveNotice && (
+                  <div
+                    role="status"
+                    className="mb-6 flex flex-wrap items-center justify-between gap-4 border border-primary/30 bg-secondary/80 px-4 py-3 text-sm text-foreground animate-in fade-in-50"
+                    data-testid="save-success-banner"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <Check className="size-4 text-primary shrink-0" aria-hidden="true" />
+                      <span>{saveNotice.message}</span>
+                    </div>
+                    {saveNotice.url && (
+                      <Button
+                        asChild
+                        variant="outline"
+                        size="sm"
+                        className="h-8 rounded-sm bg-card text-xs w-full sm:w-auto shrink-0 justify-center"
+                      >
+                        <a href={saveNotice.url} target="_blank" rel="noreferrer">
+                          Open in Notion <ArrowRight size={13} className="ml-1" />
+                        </a>
+                      </Button>
+                    )}
+                  </div>
+                )}
+                <CampaignForm
+                  value={form}
+                  onChange={(next) => {
+                    if (saveNotice) setSaveNotice(null);
+                    setForm(next);
+                  }}
+                  onSubmit={(event) => void handleGenerate(event)}
+                  generating={isGenerating}
+                  error={error}
+                  status={statusMessages[statusIndex] ?? statusMessages[0] ?? "Finding your voice…"}
+                  resetKey={resetKey}
+                />
               </div>
-              {result && <CampaignResults result={result} input={form} onResult={setResult} />}
+              {user && result && !saveNotice && !transferredCampaignIds.has(result.campaignId) && (
+                <div
+                  className="mt-6 flex flex-wrap items-center justify-between gap-4 rounded-sm border border-primary/30 bg-secondary/80 px-4 py-3.5 text-xs text-foreground animate-in fade-in-50"
+                  data-testid="guest-transfer-banner"
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Sparkles className="size-4 text-primary shrink-0" aria-hidden="true" />
+                    <span>
+                      <strong>Active draft ready:</strong> You have an active campaign for{" "}
+                      <strong>{form.brandName || "your brand"}</strong>. Save it to your account library?
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="h-8 rounded-sm text-xs font-medium"
+                      onClick={handleTransferGuestDraft}
+                      disabled={isTransferringGuest}
+                      data-testid="transfer-guest-draft-button"
+                    >
+                      {isTransferringGuest ? "Saving…" : "Save to my account"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 rounded-sm text-xs text-muted-foreground hover:text-foreground"
+                      onClick={() =>
+                        setTransferredCampaignIds((prev) => new Set(prev).add(result.campaignId))
+                      }
+                      data-testid="dismiss-transfer-draft-button"
+                    >
+                      Keep as draft
+                    </Button>
+                  </div>
+                </div>
+              )}
+              {result && (
+                <CampaignResults
+                  result={result}
+                  input={form}
+                  onResult={setResult}
+                  onSaveSuccess={handleSaveSuccess}
+                  notionStatus={notionStatus}
+                  onRequestConnectNotion={() => setConnectModalOpen(true)}
+                  onRequestSignIn={() => setSignInModalOpen(true)}
+                  onChangeDestination={() => setDestinationModalOpen(true)}
+                />
+              )}
             </div>
             <StudioGuidance value={form} connected={apiConnected} />
           </div>
@@ -579,6 +1801,26 @@ export default function App() {
         <CampaignLibrary connected={apiConnected} />
       </main>
       <Footer />
+      <NotionConnectModal
+        open={connectModalOpen}
+        onOpenChange={setConnectModalOpen}
+        campaignId={result?.campaignId}
+      />
+      <NotionDestinationModal
+        open={destinationModalOpen}
+        onOpenChange={setDestinationModalOpen}
+        currentDestinationId={notionStatus.destination?.id}
+        onDestinationUpdated={(dest) => {
+          setNotionStatus((prev) => ({
+            ...prev,
+            destination: dest,
+          }));
+        }}
+      />
+      <SignInRequiredModal
+        open={signInModalOpen}
+        onOpenChange={setSignInModalOpen}
+      />
     </div>
   );
 }
